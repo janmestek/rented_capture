@@ -10,9 +10,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  camerawesome: ^2.5.0
-  google_mlkit_object_detection: ^0.16.0
-  tflite_flutter: ^0.12.1
+  camerawesome: ">=2.0.0 <3.0.0"
+  google_mlkit_object_detection: ">=0.13.0 <1.0.0"
+  tflite_flutter: ">=0.10.0 <1.0.0"
 
 flutter:
   assets:
