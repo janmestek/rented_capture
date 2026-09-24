@@ -8,13 +8,12 @@ import 'package:flutter/scheduler.dart';
 import 'package:camerawesome/camerawesome_plugin.dart';
 import 'package:camerawesome/pigeon.dart';
 import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
+// tflite_flutter používá dart:ffi, na webu nejde zkompilovat -> stub.
+import 'src/embedder_stub.dart' if (dart.library.ffi) 'src/embedder_ffi.dart';
 
 const kBrand = Color(0xFFFF881A);
 const kOk = Color(0xFF34E58B);
 const kDim = Color(0x66000000);
-
-const _modelPath = 'packages/rented_capture/assets/mobilenet.tflite';
 
 double gCalX = 0.0;
 double gCalY = 0.0;
@@ -182,60 +181,6 @@ void prepIsolate(SendPort main) {
 }
 
 // ================= model =================
-
-class Embedder {
-  Interpreter? _it;
-  int size = 224;
-  int outLen = 1024;
-  bool ready = false;
-  String status = 'načítám model…';
-
-  Future<void> load() async {
-    try {
-      final opts = InterpreterOptions()
-        ..threads = 2
-        ..addDelegate(XNNPackDelegate());
-      _it = await Interpreter.fromAsset(_modelPath, options: opts);
-    } catch (_) {
-      try {
-        _it = await Interpreter.fromAsset(_modelPath,
-            options: InterpreterOptions()..threads = 2);
-      } catch (e) {
-        status = 'model SELHAL: $e';
-        return;
-      }
-    }
-    size = _it!.getInputTensor(0).shape[1];
-    outLen = _it!.getOutputTensor(0).shape.last;
-    ready = true;
-    status = 'model OK';
-  }
-
-  List<double> run(Float32List flat) {
-    final it = _it;
-    if (it == null || !ready) return const [];
-    final input = flat.reshape([1, size, size, 3]);
-    final output = List.generate(1, (_) => List<double>.filled(outLen, 0));
-    try {
-      it.run(input, output);
-    } catch (_) {
-      return const [];
-    }
-    final v = List<double>.from(output[0]);
-    double norm = 0;
-    for (final x in v) {
-      norm += x * x;
-    }
-    norm = sqrt(norm);
-    if (norm < 1e-6) return const [];
-    for (int i = 0; i < v.length; i++) {
-      v[i] /= norm;
-    }
-    return v;
-  }
-
-  void close() => _it?.close();
-}
 
 // ================= ML Kit =================
 
