@@ -116,12 +116,86 @@ double bestAgainst(List<double> v, List<List<double>>? bank) {
 
 class PrepJob {
   final Uint8List bytes;
-  final int imgW, imgH, size;
+  // imgW/imgH = buffer v orientaci senzoru, rot = otočení do vzpřímené polohy
+  // (stupně po směru), stride = bajtů na řádek.
+  final int imgW, imgH, size, rot, stride;
   final bool isBgra;
+  // box od ML Kitu, ve vzpřímených souřadnicích
   final double l, t, r, b;
   final SendPort reply;
   PrepJob(this.bytes, this.imgW, this.imgH, this.size, this.isBgra, this.l,
-      this.t, this.r, this.b, this.reply);
+      this.t, this.r, this.b, this.reply, this.rot, this.stride);
+}
+
+/// Vzpřímený bod (u, v) -> bod (x, y) v bufferu senzoru.
+(int, int) uprightToRaw(int u, int v, int rot, int imgW, int imgH) {
+  switch (rot) {
+    case 90:
+      return (v, imgH - 1 - u);
+    case 180:
+      return (imgW - 1 - u, imgH - 1 - v);
+    case 270:
+      return (imgW - 1 - v, u);
+    default:
+      return (u, v);
+  }
+}
+
+/// Ořízne box, otočí ho do vzpřímené polohy a zmenší na size×size RGB 0..1.
+/// Vrací null, když je box moc malý.
+Float32List? prepCrop(PrepJob j) {
+  final swap = j.rot == 90 || j.rot == 270;
+  final uw = swap ? j.imgH : j.imgW, uh = swap ? j.imgW : j.imgH;
+  final x0 = j.l.clamp(0, uw - 1).toInt();
+  final x1 = j.r.clamp(0, uw - 1).toInt();
+  final y0 = j.t.clamp(0, uh - 1).toInt();
+  final y1 = j.b.clamp(0, uh - 1).toInt();
+  final bw = x1 - x0, bh = y1 - y0;
+  if (bw < 24 || bh < 24) return null;
+
+  final bytes = j.bytes, len = bytes.length;
+  // NV21: Y rovina, za ní prokládané V,U v poloviční velikosti
+  final ySize = j.stride * j.imgH;
+  final hasUv = !j.isBgra && len >= ySize + j.stride * (j.imgH ~/ 2);
+
+  final out = Float32List(j.size * j.size * 3);
+  int k = 0;
+  for (int y = 0; y < j.size; y++) {
+    final v = y0 + (bh * y) ~/ j.size;
+    for (int x = 0; x < j.size; x++) {
+      final u = x0 + (bw * x) ~/ j.size;
+      final (sx, sy) = uprightToRaw(u, v, j.rot, j.imgW, j.imgH);
+      if (j.isBgra) {
+        final i = sy * j.stride + sx * 4;
+        if (i < 0 || i + 2 >= len) {
+          k += 3;
+          continue;
+        }
+        out[k++] = bytes[i + 2] / 255.0;
+        out[k++] = bytes[i + 1] / 255.0;
+        out[k++] = bytes[i] / 255.0;
+      } else {
+        final i = sy * j.stride + sx;
+        if (i < 0 || i >= len) {
+          k += 3;
+          continue;
+        }
+        final yv = bytes[i].toDouble();
+        if (hasUv) {
+          final c = ySize + (sy >> 1) * j.stride + (sx & ~1);
+          final cv = bytes[c] - 128.0, cu = bytes[c + 1] - 128.0;
+          out[k++] = (yv + 1.402 * cv).clamp(0, 255) / 255.0;
+          out[k++] = (yv - 0.344 * cu - 0.714 * cv).clamp(0, 255) / 255.0;
+          out[k++] = (yv + 1.772 * cu).clamp(0, 255) / 255.0;
+        } else {
+          out[k++] = yv / 255.0;
+          out[k++] = yv / 255.0;
+          out[k++] = yv / 255.0;
+        }
+      }
+    }
+  }
+  return out;
 }
 
 void prepIsolate(SendPort main) {
@@ -130,41 +204,10 @@ void prepIsolate(SendPort main) {
 
   port.listen((msg) {
     final j = msg as PrepJob;
-    final step = j.isBgra ? 4 : 1;
-    final x0 = j.l.clamp(0, j.imgW - 1).toInt();
-    final x1 = j.r.clamp(0, j.imgW - 1).toInt();
-    final y0 = j.t.clamp(0, j.imgH - 1).toInt();
-    final y1 = j.b.clamp(0, j.imgH - 1).toInt();
-    final bw = x1 - x0, bh = y1 - y0;
-
-    if (bw < 24 || bh < 24) {
+    final out = prepCrop(j);
+    if (out == null) {
       j.reply.send(null);
       return;
-    }
-
-    final out = Float32List(j.size * j.size * 3);
-    int k = 0;
-    for (int y = 0; y < j.size; y++) {
-      final sy = y0 + (bh * y) ~/ j.size;
-      final rowBase = sy * j.imgW;
-      for (int x = 0; x < j.size; x++) {
-        final sx = x0 + (bw * x) ~/ j.size;
-        final i = (rowBase + sx) * step;
-        if (i < 0 || i + 2 >= j.bytes.length) {
-          k += 3;
-          continue;
-        }
-        if (j.isBgra) {
-          out[k++] = j.bytes[i + 2] / 255.0;
-          out[k++] = j.bytes[i + 1] / 255.0;
-          out[k++] = j.bytes[i] / 255.0;
-        } else {
-          final v = j.bytes[i] / 255.0;
-          out[k++] = v;
-          out[k++] = v;
-          out[k++] = v;
-        }
-      }
     }
 
     double sum = 0;
@@ -223,6 +266,23 @@ extension MlkitConvert on AnalysisImage {
       when(nv21: (i) => i.bytes, bgra8888: (i) => i.bytes);
 
   bool get isBgra => format == InputAnalysisImageFormat.bgra8888;
+
+  int get rotDeg => switch (rotation) {
+        InputAnalysisImageRotation.rotation0deg => 0,
+        InputAnalysisImageRotation.rotation90deg => 90,
+        InputAnalysisImageRotation.rotation180deg => 180,
+        InputAnalysisImageRotation.rotation270deg => 270,
+      };
+
+  // NV21 jde z camerawesome bez zarovnání řádků, BGRA má bytesPerRow.
+  int get stride =>
+      when(nv21: (i) => i.width, bgra8888: (i) => i.planes.first.bytesPerRow) ??
+      width;
+
+  /// Rozměr vzpřímeného obrazu, ve kterém ML Kit vrací boxy.
+  Size get upright => rotDeg == 90 || rotDeg == 270
+      ? Size(height.toDouble(), width.toDouble())
+      : size;
 }
 
 // ================= widget =================
@@ -517,7 +577,7 @@ class _CaptureSessionState extends State<CaptureSession>
 
     _autoFocus(b, img.size);
 
-    final iw = img.size.width, ih = img.size.height;
+    final iw = img.upright.width, ih = img.upright.height;
     final area = (b.width * b.height) / (iw * ih);
     double s;
     if (area < 0.05) {
@@ -557,8 +617,9 @@ class _CaptureSessionState extends State<CaptureSession>
       if (bytes != null) {
         final t0 = DateTime.now();
         final rp = ReceivePort();
-        _isoPort!.send(PrepJob(bytes, iw.toInt(), ih.toInt(), embedder.size,
-            img.isBgra, b.left, b.top, b.right, b.bottom, rp.sendPort));
+        _isoPort!.send(PrepJob(bytes, img.width, img.height, embedder.size,
+            img.isBgra, b.left, b.top, b.right, b.bottom, rp.sendPort,
+            img.rotDeg, img.stride));
         final res = await rp.first;
         rp.close();
 
@@ -647,7 +708,7 @@ class _CaptureSessionState extends State<CaptureSession>
       runnerUpSim = 0;
       heatTarget = q.clamp(0.0, 1.0);
 
-      final qT = hadLock ? spec.minQuality - 0.15 : spec.minQuality + 0.15;
+      final qT = hadLock ? spec.minQuality - 0.15 : spec.minQuality;
       if (q >= qT) {
         hadLock = true;
         holdSince ??= DateTime.now();
